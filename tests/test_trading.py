@@ -323,3 +323,33 @@ class TestIntegrationWithFakeExchange(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRealSim(unittest.TestCase):
+    def test_walk_forward_report(self):
+        from bfbot import realsim
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "s.jsonl.gz")
+        generate(path, minutes=14, seed=5)
+        old = realsim.GRID
+        realsim.GRID = old[:2]
+        try:
+            out = os.path.join(tmp, "site")
+            res = realsim.run([path], load_config(None), out, workers=1)
+        finally:
+            realsim.GRID = old
+        self.assertIn(res["verdict"]["level"], ("no", "unclear", "maybe"))
+        self.assertEqual(len(res["grid"]), 2)
+        for name in ("index.html", "results.json", "history.json", "summary.md"):
+            self.assertTrue(os.path.exists(os.path.join(out, name)))
+        html_text = open(os.path.join(out, "index.html"), encoding="utf-8").read()
+        self.assertIn("儲かる？", html_text)
+        # 前半で売買しないまま後半の板・指標が作られている
+        self.assertGreater(res["chosen"]["second"]["hours"], 0.05)
+
+    def test_no_data_page(self):
+        from bfbot import realsim
+        tmp = tempfile.mkdtemp()
+        res = realsim.run([os.path.join(tmp, "none")], load_config(None), os.path.join(tmp, "site"), workers=1)
+        self.assertIn("error", res)
+        self.assertTrue(os.path.exists(os.path.join(tmp, "site", "index.html")))

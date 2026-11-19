@@ -10,6 +10,7 @@
   python run.py live --i-understand-real-money   本番（3重ロックを全部外した時だけ）
   python run.py synth                            動作確認用の合成データを作る
   python run.py simulate [--all]                 模擬相場で「儲かるか」を試す（予測力の強さ別）
+  python run.py realsim  data/ --out site        実データで「儲かるか」（前半で選び後半で試す）→ ページ
 """
 
 from __future__ import annotations
@@ -135,6 +136,15 @@ def cmd_simulate(args, cfg):
     print("\n※ 予測力IC は bot の合成スコアと30秒後の値動きの相関。実データの値は analyze で測れます。")
 
 
+def cmd_realsim(args, cfg):
+    from bfbot.realsim import run
+    setup_logging()
+    run(args.paths, cfg, args.out, run_url=args.run_url or "", workers=args.workers, model_path=args.model)
+    with open(os.path.join(args.out, "summary.md"), encoding="utf-8") as fh:
+        print(fh.read())
+    print(f"ページ: {os.path.join(args.out, 'index.html')}")
+
+
 def cmd_synth(args, cfg):
     from bfbot.synth import generate
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -197,6 +207,14 @@ def main(argv=None):
     s.add_argument("--spread-bps", type=float, default=1.8)
     s.add_argument("--all", action="store_true", help="予測力がとても強い・極端なケースも入れる")
     s.set_defaults(func=cmd_simulate)
+
+    s = sub.add_parser("realsim")
+    s.add_argument("paths", nargs="+")
+    s.add_argument("--out", default="site")
+    s.add_argument("--run-url")
+    s.add_argument("--workers", type=int)
+    s.add_argument("--model", default="results/model.json")
+    s.set_defaults(func=cmd_realsim)
 
     s = sub.add_parser("synth")
     s.add_argument("--out", default="data_synth/synth.jsonl.gz")

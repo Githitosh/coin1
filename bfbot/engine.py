@@ -244,14 +244,26 @@ def make_paper_broker(cfg: dict) -> PaperBroker:
                        leverage_point_rate_per_day=p["leverage_point_rate_per_day"])
 
 
-def run_backtest(cfg: dict, paths, quiet: bool = True) -> Engine:
+def run_backtest(cfg: dict, paths, quiet: bool = True, t_from: Optional[float] = None,
+                 t_to: Optional[float] = None) -> Engine:
+    """t_from より前は板と指標を作るだけ（売買しない）。t_to 以降は読まない。"""
     broker = make_paper_broker(cfg)
     eng = Engine(cfg, broker, mode="backtest", quiet=quiet)
+    warming = t_from is not None
+    if warming:
+        eng.trading_enabled = False
     for rec in iter_records(paths):
         ch = rec.get("ch")
         t = rec.get("t")
         if ch is None or t is None:
             continue
+        if t_to is not None and t >= t_to:
+            break
+        if warming and t >= t_from:
+            warming = False
+            eng.trading_enabled = True
+            eng.first_t = None
+            eng.equity_curve.clear()
         eng.on_message(ch, rec.get("m"), float(t))
     if eng.book.ready and eng.last_t is not None:
         broker.force_close(eng.book, eng.last_t, reason="バックテスト終了")

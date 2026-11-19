@@ -1,0 +1,104 @@
+# 実データで「儲かるか」を調べる（お金は動かさない模擬売買）
+# - bitFlyer 公式 Realtime API から板と約定を記録（API キーは使わない）
+# - 記録の前半で設定を選び、後半で成績を確かめる
+# - 結果のページを gh-pages ブランチに置く → https://githitosh.github.io/coin1/
+# 手で動かす: Actions タブ → 「実データで儲かるか」→ Run workflow（記録する分数を入れられる）
+# スマホから: simulate-request.txt を書き換えてコミットしても始まる
+name: 実データで儲かるか
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "記録する時間（分、5〜300）"
+        required: false
+        default: "60"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/simulate.yml"
+      - "simulate-request.txt"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: simulate
+  cancel-in-progress: false
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      MINUTES: ${{ github.event.inputs.minutes || '60' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: テスト
+        run: python3 -W ignore::ResourceWarning -m unittest discover -s tests -t .
+
+      - name: bitFlyer の公式 API に届くか確認
+        run: |
+          python3 - <<'PY'
+          import sys, threading
+          from bfbot.rest import BitflyerREST
+          from bfbot.ws import RealtimeClient
+          try:
+              print("HTTP API:", BitflyerREST().get_boardstate("FX_BTC_JPY"))
+          except Exception as e:
+              print("HTTP API: 失敗", e)
+          got = threading.Event()
+          c = RealtimeClient(["lightning_executions_FX_BTC_JPY"], lambda ch, m, t: got.set(), name="probe")
+          c.start()
+          ok = got.wait(40)
+          c.stop()
+          print("Realtime API:", "受信できた" if ok else "受信できない")
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: 板と約定を記録
+        run: |
+          HOURS=$(python3 -c "import os; m=min(300.0, max(5.0, float(os.environ['MINUTES']))); print(m/60)")
+          echo "記録する時間: ${HOURS} 時間"
+          python3 run.py record --out data --hours "$HOURS"
+          ls -la data
+
+      - name: これまでの結果と最新の模擬相場の結果を取り込む
+        run: |
+          mkdir -p site results
+          if git fetch --depth 1 origin gh-pages 2>/dev/null; then
+            git show FETCH_HEAD:history.json > site/history.json 2>/dev/null || rm -f site/history.json
+          fi
+          git fetch --depth 1 origin main && git show FETCH_HEAD:results/model.json > results/model.json 2>/dev/null || true
+
+      - name: シミュレーション
+        run: >
+          python3 run.py realsim data --out site --model results/model.json
+          --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: 結果のページを公開（gh-pages）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd site
+          touch .nojekyll
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "シミュレーション結果 $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+
+      - name: 要約
+        if: always()
+        run: test -f site/summary.md && cat site/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 記録したデータを保存（7日間）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitflyer-data
+          path: data
+          retention-days: 7
+          if-no-files-found: ignore
