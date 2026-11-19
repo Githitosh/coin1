@@ -96,16 +96,52 @@ def _with(cfg: dict, params: dict) -> dict:
     return c
 
 
-def _verdict(oos: dict) -> dict:
+def _why(a: dict) -> str:
+    """なぜそうなるかを、傾向分析の数字で説明する"""
+    sp = a.get("spread_median_bps") or 0.0
+    rows = sorted(a.get("by_h", {}).items(), key=lambda kv: float(kv[0]))
+    pred = [(h, d) for h, d in rows if (d["ic"].get("score") or 0.0) >= 0.05]
+    if pred:
+        h, d = pred[-1]
+        mv = d["typical_abs_bps"]
+        if mv < sp:
+            return (f"bot の指標が当たるのは {h} 秒先くらいまでで、その間の値動き（中央値 {mv:.2f} bps）が"
+                    f"スプレッド（{sp:.2f} bps）より小さいためです。もっと先の値動きは当たっていません。")
+        return f"当たり方はあるものの、スプレッド（{sp:.2f} bps）を払うとほとんど残りません。"
+    return f"指標がその後の値動きをほとんど当てておらず、スプレッド（{sp:.2f} bps）の分だけ負けます。"
+
+
+def _best_edge(a: dict) -> Optional[float]:
+    best = None
+    for d in a.get("by_h", {}).values():
+        for r in d["table"]:
+            v = r.get("テイカー損益_bps")
+            if r.get("件数", 0) >= 30 and v is not None and (best is None or v > best):
+                best = v
+    return best
+
+
+def _verdict(res: dict) -> dict:
+    oos = res["chosen"]["second"]
+    seconds = [g["second"] for g in res["grid"]]
+    tot = sum(x["trades"] for x in seconds)
+    pos = [x for x in seconds if x["trades"] >= 5 and (x["avg_bps"] or 0.0) > 0]
+    why = _why(res["analysis"])
+    edge = _best_edge(res["analysis"])
+    vals = [x["avg_bps"] for x in seconds if x["avg_bps"] is not None]
+    if not pos and tot >= 30 and (edge is None or edge <= 0) and vals:
+        return {"level": "no", "label": "儲からない",
+                "detail": (f"記録の後半（設定選びに使っていないデータ）では、{len(seconds)} 通りの設定すべてが"
+                           f"1回あたりマイナスでした（{min(vals):+.2f}〜{max(vals):+.2f} bps、合計 {tot} 回）。" + why)}
     n = oos["trades"]
     avg = oos["avg_bps"]
     if n < 10:
         return {"level": "unclear", "label": "まだ判断できない",
-                "detail": f"選ぶのに使っていない後半の取引が {n} 回しかありません。もっと長く記録して確かめます。"}
+                "detail": f"選ぶのに使っていない後半の取引が {n} 回しかありません。もっと長く記録して確かめます。" + why}
     if oos["pnl_jpy"] <= 0:
         return {"level": "no", "label": "儲からない",
                 "detail": (f"記録の前半で一番良かった設定でも、後半（未知のデータ）では1回あたり平均 {avg:+.2f} bps"
-                           f"（{n} 回）でした。スプレッドを払うとマイナスです。")}
+                           f"（{n} 回）でした。" + why)}
     ts = oos["t_stat"]
     if ts is None or ts < 2.0:
         return {"level": "unclear", "label": "プラスだが偶然と区別できない",
@@ -170,7 +206,7 @@ def run(paths, cfg: dict, out_dir: str, run_url: str = "", workers: Optional[int
     res["chosen"] = chosen
     res["default"] = out["default"]
     oos = chosen["second"]
-    res["verdict"] = _verdict(oos)
+    res["verdict"] = _verdict(res)
 
     size = float(cfg["strategy"]["size"])
     mid = oos["mid"] or out["default"]["mid"]
@@ -179,9 +215,15 @@ def run(paths, cfg: dict, out_dir: str, run_url: str = "", workers: Optional[int
                     "per_day_jpy": oos["pnl_jpy"] * k * 24.0 / oos["hours"] if oos["hours"] else None}
     res["required"] = required_rates(100.0, 3.0)
     res["hold_price_multiple"] = hold_price_multiple(100.0, 2.0)
-    if oos["avg_win_bps"] and oos["avg_loss_bps"] and oos["trades_per_hour"]:
-        res["projection"] = prob_reach(oos["win_rate"], oos["avg_win_bps"], oos["avg_loss_bps"],
-                                       oos["trades_per_hour"] * 24.0, 3.0, 2.0, 100.0)
+    for basis, st in (("後半で選んだ設定", oos), ("既定の設定（記録全体）", out["default"])):
+        if st["avg_win_bps"] and st["avg_loss_bps"] and st["trades_per_hour"]:
+            pj = prob_reach(st["win_rate"], st["avg_win_bps"], st["avg_loss_bps"],
+                            st["trades_per_hour"] * 24.0, 3.0, 2.0, 100.0)
+            pj["basis"] = basis
+            pj["win_rate"] = st["win_rate"]
+            pj["trades_per_day"] = st["trades_per_hour"] * 24.0
+            res["projection"] = pj
+            break
     _write(res, out_dir, model_path)
     return res
 
@@ -377,7 +419,7 @@ def build_html(res: dict, history: List[dict], model: Optional[dict]) -> str:
         pj = res.get("projection")
         if pj:
             need = pj["必要な勝率"]
-            parts.append(f"<li>この成績（勝率 {_pct(o['win_rate'])}、1日 {o['trades_per_hour'] * 24:.0f} 回）で"
+            parts.append(f"<li>{e(pj['basis'])}の成績（勝率 {_pct(pj['win_rate'])}、1日 {pj['trades_per_day']:.0f} 回）で"
                          f"資金いっぱい（2倍）で3日続けると、中央値は {pj['中央値の倍率']:.3g} 倍。"
                          f"100倍には勝率 {'100%を超える値' if need > 1 else f'{need * 100:.1f}%'} が必要</li>")
         parts.append("</ul>")
