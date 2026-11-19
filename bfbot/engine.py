@@ -63,6 +63,7 @@ class Engine:
         self.first_t: Optional[float] = None
         self.last_t: Optional[float] = None
         self.last_equity: Optional[float] = None
+        self.last_mid: Optional[float] = None
 
     def channels(self) -> List[str]:
         return [self.ch_snap, self.ch_board, self.ch_exec]
@@ -104,6 +105,11 @@ class Engine:
                 if self.broker.live:
                     self.broker.on_child_order_events(message, t)
             elif channel == "_disconnect":
+                # 記録の再生で切断の目印が来たら、板が消える前に建玉を閉じる
+                # （本番でもデータが止まったまま建玉が残れば決済する）
+                if not self.broker.live and self.book.ready and abs(self.broker.position) > EPS:
+                    self.broker.force_close(self.book, t, reason="切断")
+                    self.last_equity = self.broker.equity(self.book.best_bid, self.book.best_ask)
                 self.book.reset()
                 self.feat.reset_flow()
                 return
@@ -121,6 +127,7 @@ class Engine:
         bid, ask = book.best_bid, book.best_ask
         eq = self.broker.equity(bid, ask)
         self.last_equity = eq
+        self.last_mid = book.mid
         self.risk.update_equity(eq, t)
         if t - self._last_eq_sample >= 1.0:
             self.equity_curve.append((t, eq))
@@ -184,7 +191,7 @@ class Engine:
             mdd = max(mdd, peak - e)
         hours = ((self.last_t - self.first_t) / 3600.0) if self.first_t and self.last_t else 0.0
         size = float(self.cfg["strategy"]["size"])
-        mid = self.book.mid or 0.0
+        mid = self.last_mid or 0.0
         avg_bps = (sum(pnls) / len(pnls) / (size * mid) * 1e4) if pnls and mid > 0 and size > 0 else None
         ack = list(getattr(self.broker, "ack_ms", []))
         return {

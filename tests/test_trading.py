@@ -331,6 +331,14 @@ class TestRealSim(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         path = os.path.join(tmp, "s.jsonl.gz")
         generate(path, minutes=14, seed=5)
+        import gzip
+        import json as _json
+        last_t = None
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                last_t = _json.loads(line)["t"]
+        with gzip.open(path, "at", encoding="utf-8") as fh:  # 記録の最後に付く切断の目印
+            fh.write(_json.dumps({"t": last_t + 0.1, "ch": "_disconnect", "m": None}) + "\n")
         old = realsim.GRID
         realsim.GRID = old[:2]
         try:
@@ -346,6 +354,10 @@ class TestRealSim(unittest.TestCase):
         self.assertIn("儲かる？", html_text)
         # 前半で売買しないまま後半の板・指標が作られている
         self.assertGreater(res["chosen"]["second"]["hours"], 0.05)
+        # 最後の切断の目印で板が消えても、取引は数えられている（以前は 0 回になっていた）
+        self.assertGreater(res["default"]["trades"], 0)
+        self.assertGreater(res["chosen"]["second"]["trades"] + res["chosen"]["first"]["trades"], 0)
+        self.assertIsNotNone(res["default"]["avg_bps"])
 
     def test_no_data_page(self):
         from bfbot import realsim

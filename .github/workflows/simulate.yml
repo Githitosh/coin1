@@ -3,7 +3,8 @@
 # - 記録の前半で設定を選び、後半で成績を確かめる
 # - 結果のページを gh-pages ブランチに置く → https://githitosh.github.io/coin1/
 # 手で動かす: Actions タブ → 「実データで儲かるか」→ Run workflow（記録する分数を入れられる）
-# スマホから: simulate-request.txt を書き換えてコミットしても始まる
+# スマホから: simulate-request.txt を書き換えてコミットしても始まる（minutes= と reuse_run_id= を読む）
+# reuse_run_id に前の実行の番号を入れると、記録せずにその実行のデータで計算し直す
 name: 実データで儲かるか
 
 on:
@@ -13,6 +14,10 @@ on:
         description: "記録する時間（分、5〜300）"
         required: false
         default: "60"
+      reuse_run_id:
+        description: "記録せず、前の実行（番号）のデータで計算し直す（空なら新しく記録）"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
@@ -21,6 +26,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: simulate
@@ -30,15 +36,30 @@ jobs:
   simulate:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    env:
-      MINUTES: ${{ github.event.inputs.minutes || '60' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 設定を読む
+        id: opt
+        env:
+          IN_MIN: ${{ github.event.inputs.minutes }}
+          IN_REUSE: ${{ github.event.inputs.reuse_run_id }}
+        run: |
+          MIN="$IN_MIN"; REUSE="$IN_REUSE"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -f simulate-request.txt ]; then
+            MIN=$(sed -n 's/^minutes=\([0-9.]*\).*/\1/p' simulate-request.txt | head -1)
+            REUSE=$(sed -n 's/^reuse_run_id=\([0-9]*\).*/\1/p' simulate-request.txt | head -1)
+          fi
+          MIN=$(python3 -c "import sys; m=float(sys.argv[1] or 60); print(min(300.0, max(5.0, m)))" "${MIN}")
+          echo "minutes=${MIN}" >> "$GITHUB_OUTPUT"
+          echo "reuse=${REUSE}" >> "$GITHUB_OUTPUT"
+          echo "記録: ${MIN} 分 / 前のデータを使う: ${REUSE:-なし}"
 
       - name: テスト
         run: python3 -W ignore::ResourceWarning -m unittest discover -s tests -t .
 
       - name: bitFlyer の公式 API に届くか確認
+        if: steps.opt.outputs.reuse == ''
         run: |
           python3 - <<'PY'
           import sys, threading
@@ -58,11 +79,23 @@ jobs:
           PY
 
       - name: 板と約定を記録
+        if: steps.opt.outputs.reuse == ''
+        env:
+          MINUTES: ${{ steps.opt.outputs.minutes }}
         run: |
-          HOURS=$(python3 -c "import os; m=min(300.0, max(5.0, float(os.environ['MINUTES']))); print(m/60)")
+          HOURS=$(python3 -c "import os; print(float(os.environ['MINUTES'])/60)")
           echo "記録する時間: ${HOURS} 時間"
           python3 run.py record --out data --hours "$HOURS"
           ls -la data
+
+      - name: 前の実行で記録したデータを取り込む
+        if: steps.opt.outputs.reuse != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: bitflyer-data
+          path: data
+          run-id: ${{ steps.opt.outputs.reuse }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: これまでの結果と最新の模擬相場の結果を取り込む
         run: |
@@ -94,11 +127,11 @@ jobs:
         if: always()
         run: test -f site/summary.md && cat site/summary.md >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: 記録したデータを保存（7日間）
-        if: always()
+      - name: 記録したデータを保存（3日間）
+        if: always() && steps.opt.outputs.reuse == ''
         uses: actions/upload-artifact@v4
         with:
           name: bitflyer-data
           path: data
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: ignore

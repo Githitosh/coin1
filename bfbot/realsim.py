@@ -53,7 +53,7 @@ def _downsample(curve, n=240):
 def trade_stats(eng, cfg) -> dict:
     s = eng.summary()
     size = float(cfg["strategy"]["size"])
-    mid = eng.book.mid or 0.0
+    mid = eng.last_mid or 0.0  # 記録の最後は切断の目印で板が消えるので、最後に見た値を使う
     notional = size * mid
     pnls = [p for _, p, _ in eng.broker.pos.round_trips]
     bps = [p / notional * 1e4 for p in pnls] if notional > 0 else []
@@ -198,7 +198,11 @@ def _write(res: dict, out_dir: str, model_path: Optional[str]) -> None:
             history = []
     if "error" not in res:
         oos = res["chosen"]["second"]
-        history.insert(0, {"jst": res["generated_jst"], "hours": res["data"]["hours"], "trades": oos["trades"],
+        window = f"{res['data']['from_jst']}〜{res['data']['to_jst']}"
+        # 同じデータの計算し直しは置き換える（時間帯を持たない古い形式の行も外す）
+        history = [h for h in history if h.get("window") and h.get("window") != window]
+        history.insert(0, {"jst": res["generated_jst"], "window": window, "hours": res["data"]["hours"],
+                           "trades": oos["trades"],
                            "avg_bps": oos["avg_bps"], "win_rate": oos["win_rate"], "label": res["verdict"]["label"],
                            "level": res["verdict"]["level"], "spread_bps": res["analysis"]["spread_median_bps"],
                            "run_url": res.get("run_url", "")})
@@ -389,10 +393,10 @@ def build_html(res: dict, history: List[dict], model: Optional[dict]) -> str:
                      "<tr><th>クセ</th><th>予測力</th><th>設定</th><th>回/日</th><th>勝率</th><th>3日の損益(円)</th>"
                      "<th>黒字</th></tr>" + "".join(rows) + "</table></div>")
     if history:
-        rows = "".join(f"<tr><td>{e(h['jst'])}</td><td>{h['hours']:.1f}h</td><td>{h['trades']}</td>"
+        rows = "".join(f"<tr><td>{e(h.get('window', h['jst']))}</td><td>{h['hours']:.1f}h</td><td>{h['trades']}</td>"
                        f"<td class='{_cls(h['avg_bps'])}'>{_f(h['avg_bps'])}</td><td>{e(h['label'])}</td></tr>"
                        for h in history)
-        parts.append("<h2>これまでの結果</h2><div class='scroll'><table><tr><th>日時</th><th>記録</th>"
+        parts.append("<h2>これまでの結果</h2><div class='scroll'><table><tr><th>記録した時間帯</th><th>長さ</th>"
                      "<th>回</th><th>bps/回</th><th>判定</th></tr>" + rows + "</table></div>")
     link = f" ・ <a href='{e(res['run_url'])}'>この実行の記録</a>" if res.get("run_url") else ""
     parts.append("<footer>データ: bitFlyer 公式 Realtime API（記録は GitHub Actions 上）。API キーは使っていません。"
