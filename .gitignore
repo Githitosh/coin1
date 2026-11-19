@@ -1,0 +1,6 @@
+data/
+data_synth/
+logs/
+config.json
+__pycache__/
+*.pyc
